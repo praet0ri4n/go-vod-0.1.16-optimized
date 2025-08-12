@@ -4,24 +4,59 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 
 	"github.com/pulsejet/go-vod/transcoder"
 )
 
-const VERSION = "0.1.28"
+const VERSION = "0.1.16"
 
 func main() {
-	// Build initial configuration
+	// Auto-detect optimal settings based on hardware
+	cpuCount := runtime.NumCPU()
+	maxConcurrent := cpuCount / 2 // Conservative: 2 CPU cores per transcode
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	
+	// For NVENC, allow more concurrent streams since GPU can handle multiple
+	// Use more conservative settings only if system is likely constrained
+	if maxConcurrent > 6 {
+		maxConcurrent = 6 // Cap higher for better GPU utilization
+	}
+
+	// Build initial configuration with hardware-aware defaults
 	c := &transcoder.Config{
 		VersionMonitor:  false,
 		Version:         VERSION,
 		Bind:            ":47788",
 		ChunkSize:       3,
-		LookBehind:      3,
-		GoalBufferMin:   1,
-		GoalBufferMax:   4,
+		LookBehind:      8,        // Even more for high bitrate content
+		GoalBufferMin:   3,        // Start buffering earlier
+		GoalBufferMax:   12,       // Much larger buffer for demanding content
 		StreamIdleTime:  60,
 		ManagerIdleTime: 60,
+		
+		// Performance optimizations with intelligent defaults
+		MaxConcurrentTranscodes: maxConcurrent,
+		GPUMemoryFraction:      0.75,    // Use 75% of GPU memory
+		CUDADevice:             0,       // Primary GPU
+		NPPStreamCount:         2,       // 2 NPP streams for parallelism
+		CUDADecodeThreads:      4,       // 4 decode threads
+		ChunkBufferSize:        128,     // 128KB I/O buffer
+		EnableMemoryMapping:    true,    // Enable for large files
+		EnableClientHints:      true,    // Parse client capabilities
+		AdaptiveComplexity:     true,    // Adjust encoding based on content
+		
+		// NVENC settings - use NPP since your system supports it
+		NVENCScale:             "npp",   // Use NPP scaler for better performance
+		
+		// HLS compatibility defaults for maximum browser support
+		HLSVersion:         3,        // HLS v3 for maximum compatibility
+		EnableFMP4:         true,     // Support modern browsers
+		EnableTSFallback:   true,     // Fallback for older browsers
+		LowBandwidthMode:   false,    // Auto-detect based on client
+		ForceCompatibility: false,    // Let client detection decide
 	}
 
 	// Parse arguments

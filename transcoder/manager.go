@@ -62,12 +62,19 @@ func NewManager(c *Config, path string, id string, close chan string) (*Manager,
 
 	m.numChunks = int(math.Ceil(m.probe.Duration.Seconds() / float64(c.ChunkSize)))
 
-	// Possible streams
-	m.streams["480p"] = &Stream{c: c, m: m, quality: "480p", height: 480, width: 854, bitrate: 400}
-	m.streams["720p"] = &Stream{c: c, m: m, quality: "720p", height: 720, width: 1280, bitrate: 700}
-	m.streams["1080p"] = &Stream{c: c, m: m, quality: "1080p", height: 1080, width: 1920, bitrate: 1000}
-	m.streams["1440p"] = &Stream{c: c, m: m, quality: "1440p", height: 1440, width: 2560, bitrate: 1400}
-	m.streams["2160p"] = &Stream{c: c, m: m, quality: "2160p", height: 2160, width: 3840, bitrate: 3000}
+	// Possible streams (bitrates in bps for proper HLS BANDWIDTH reporting)
+	// Add extra low-bandwidth options for TV browsers and limited devices
+	if m.c.LowBandwidthMode {
+		m.streams["360p"] = &Stream{c: c, m: m, quality: "360p", height: 360, width: 640, bitrate: 500000}  // Ultra-low for TV
+	}
+	m.streams["480p"] = &Stream{c: c, m: m, quality: "480p", height: 480, width: 854, bitrate: 800000}
+	m.streams["720p"] = &Stream{c: c, m: m, quality: "720p", height: 720, width: 1280, bitrate: 1500000}
+	m.streams["1080p"] = &Stream{c: c, m: m, quality: "1080p", height: 1080, width: 1920, bitrate: 3000000}
+	
+	// Skip high res for low bandwidth mode
+	if !m.c.LowBandwidthMode {
+		m.streams["1440p"] = &Stream{c: c, m: m, quality: "1440p", height: 1440, width: 2560, bitrate: 6000000}
+	}
 
 	// height is our primary dimension for scaling
 	// using the probed size, we adjust the width of the stream
@@ -87,6 +94,14 @@ func NewManager(c *Config, path string, id string, close chan string) (*Manager,
 	// If bitrate could not be read, use 10Mbps
 	if refBitrate == 0 {
 		refBitrate = 10000000
+	}
+	
+	// For very high bitrate content (>50Mbps), adjust quality targets
+	isHighBitrate := m.probe.BitRate > 50000000
+	if isHighBitrate {
+		log.Printf("%s: detected high bitrate content (%d bps), optimizing settings", m.id, m.probe.BitRate)
+		// Increase reference bitrate for high bitrate sources to maintain quality
+		refBitrate = int(float64(refBitrate) * 1.2)
 	}
 
 	// Get the multiplier for the reference bitrate.
@@ -116,13 +131,40 @@ func NewManager(c *Config, path string, id string, close chan string) (*Manager,
 		// scale bitrate using the multiplier
 		stream.bitrate = int(math.Ceil(float64(stream.bitrate) * bitrateMultiplier))
 
-		// now store the width of the stream as the larger dimension
-		stream.width = int(math.Ceil(float64(lgDim) * float64(stream.height) / float64(smDim)))
+		// Calculate proper width maintaining aspect ratio
+		// Account for rotation metadata
+		sourceWidth := m.probe.Width
+		sourceHeight := m.probe.Height
+		
+		// Handle rotation metadata (90/-90 degree rotations swap dimensions)
+		if m.probe.Rotation == 90 || m.probe.Rotation == -90 || m.probe.Rotation == 270 {
+			sourceWidth, sourceHeight = sourceHeight, sourceWidth
+		}
+		
+		aspectRatio := float64(sourceWidth) / float64(sourceHeight)
+		stream.width = int(math.Ceil(float64(stream.height) * aspectRatio))
+		
+		log.Printf("%s: stream %s - source: %dx%d (rotation: %d), target: %dx%d, aspect: %.2f", 
+			m.id, k, m.probe.Width, m.probe.Height, m.probe.Rotation, stream.width, stream.height, aspectRatio)
+		
+		// Ensure even dimensions for encoder compatibility
+		if stream.width%2 != 0 {
+			stream.width++
+		}
+		if stream.height%2 != 0 {
+			stream.height++
+		}
+
+		// Special handling for square or unusual aspect ratios
+		isSquareish := math.Abs(aspectRatio-1.0) < 0.1 // within 10% of square
+		if isSquareish {
+			log.Printf("%s: detected square/unusual aspect ratio %.2f for %s", m.id, aspectRatio, k)
+		}
 
 		// remove invalid streams
 		if (stream.height >= smDim || stream.width >= lgDim) || // no upscaling; we're not AI
 			(float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) || // no more than 80% of original bitrate
-			(stream.height%2 != 0 || stream.width%2 != 0) { // no odd dimensions
+			(stream.width < 64 || stream.height < 64) { // minimum sane dimensions
 
 			// remove stream
 			delete(m.streams, k)
@@ -140,7 +182,10 @@ func NewManager(c *Config, path string, id string, close chan string) (*Manager,
 		order:   1,
 	}
 
-	// Start all streams
+	// Start all streams with concurrent management
+	streamCount := len(m.streams)
+	log.Printf("%s: starting %d streams with max %d concurrent transcodes", m.id, streamCount, m.c.MaxConcurrentTranscodes)
+	
 	for _, stream := range m.streams {
 		go stream.Run()
 	}
@@ -213,9 +258,12 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request, chunk string
 		}
 	}
 
-	// Stream chunk
+	// Stream chunk (support both TS and MP4)
 	tsSfx := ".ts"
-	if strings.HasSuffix(chunk, tsSfx) {
+	mp4Sfx := ".mp4"
+	isChunk := strings.HasSuffix(chunk, tsSfx) || strings.HasSuffix(chunk, mp4Sfx)
+	
+	if isChunk {
 		parts := strings.Split(chunk, "-")
 		if len(parts) != 2 {
 			w.WriteHeader(http.StatusBadRequest)
@@ -223,7 +271,13 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request, chunk string
 		}
 
 		quality := parts[0]
-		chunkIdStr := strings.TrimSuffix(parts[1], tsSfx)
+		var chunkIdStr string
+		if strings.HasSuffix(chunk, tsSfx) {
+			chunkIdStr = strings.TrimSuffix(parts[1], tsSfx)
+		} else {
+			chunkIdStr = strings.TrimSuffix(parts[1], mp4Sfx)
+		}
+		
 		chunkId, err := strconv.Atoi(chunkIdStr)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -236,9 +290,8 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request, chunk string
 	}
 
 	// Stream full video
-	mp4Sfx := ".mp4"
-	if strings.HasSuffix(chunk, mp4Sfx) {
-		quality := strings.TrimSuffix(chunk, mp4Sfx)
+	if strings.HasSuffix(chunk, ".mp4") {
+		quality := strings.TrimSuffix(chunk, ".mp4")
 		if stream, ok := m.streams[quality]; ok {
 			return stream.ServeFullVideo(w, r)
 		}
@@ -265,13 +318,138 @@ func (m *Manager) ServeIndex(w http.ResponseWriter, r *http.Request) error {
 			(streams[i].order == streams[j].order && streams[i].bitrate < streams[j].bitrate)
 	})
 
-	// Write all streams
+	// Write all streams with enhanced ABR information
 	query := GetQueryString(r)
+	
+	// Client capability detection
+	clientHints := ""
+	if m.c.EnableClientHints {
+		userAgent := r.Header.Get("User-Agent")
+		clientHints = m.analyzeClientCapabilities(userAgent)
+	}
+	
 	for _, stream := range streams {
-		s := fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%d\n%s.m3u8%s\n", stream.bitrate, stream.width, stream.height, m.probe.FrameRate, stream.quality, query)
-		w.Write([]byte(s))
+		// Calculate average bandwidth (slightly lower than peak for better ABR decisions)
+		avgBandwidth := int(float64(stream.bitrate) * 0.85)
+		
+		// Enhanced HLS stream info for better client decision making
+		streamInfo := fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%d,CODECS=\"avc1.42E01E,mp4a.40.2\"", 
+			stream.bitrate, avgBandwidth, stream.width, stream.height, m.probe.FrameRate)
+		
+		// Add client-specific hints if available
+		if clientHints != "" {
+			streamInfo += "," + clientHints
+		}
+		
+		streamInfo += fmt.Sprintf("\n%s.m3u8%s\n", stream.quality, query)
+		w.Write([]byte(streamInfo))
 	}
 	return nil
+}
+
+// Analyze client capabilities based on User-Agent and other headers
+func (m *Manager) analyzeClientCapabilities(userAgent string) string {
+	hints := make([]string, 0)
+	ua := strings.ToLower(userAgent)
+	
+	// Detailed browser detection for format selection
+	browserInfo := m.detectBrowserCapabilities(ua)
+	
+	// Device type detection with more specificity
+	if strings.Contains(ua, "tv") || strings.Contains(ua, "smarttv") || strings.Contains(ua, "roku") || strings.Contains(ua, "chromecast") {
+		hints = append(hints, "DEVICE-TYPE=\"tv\"")
+		hints = append(hints, "PREFERRED-MAX-BANDWIDTH=4000000") // Conservative for TV browsers
+		m.setLowBandwidthMode(true) // Enable low bandwidth mode for TV
+	} else if strings.Contains(ua, "mobile") || strings.Contains(ua, "android") || strings.Contains(ua, "iphone") {
+		hints = append(hints, "DEVICE-TYPE=\"mobile\"")
+		hints = append(hints, "PREFERRED-MAX-BANDWIDTH=2000000")
+	} else if strings.Contains(ua, "tablet") || strings.Contains(ua, "ipad") {
+		hints = append(hints, "DEVICE-TYPE=\"tablet\"")
+		hints = append(hints, "PREFERRED-MAX-BANDWIDTH=4000000")
+	} else {
+		hints = append(hints, "DEVICE-TYPE=\"desktop\"")
+		hints = append(hints, "PREFERRED-MAX-BANDWIDTH=8000000")
+	}
+	
+	// Add browser capabilities
+	hints = append(hints, browserInfo...)
+	
+	// Hardware acceleration hints
+	if strings.Contains(ua, "arm64") || strings.Contains(ua, "aarch64") {
+		hints = append(hints, "ARCH=\"arm64\"")
+	} else if strings.Contains(ua, "x86_64") || strings.Contains(ua, "amd64") {
+		hints = append(hints, "ARCH=\"x86_64\"")
+	}
+	
+	return strings.Join(hints, ",")
+}
+
+// Detect browser capabilities for format selection
+func (m *Manager) detectBrowserCapabilities(ua string) []string {
+	caps := make([]string, 0)
+	
+	// Chrome family (supports fMP4, latest HLS)
+	if strings.Contains(ua, "chrome") && !strings.Contains(ua, "edg") {
+		caps = append(caps, "BROWSER=\"chrome\"")
+		caps = append(caps, "SUPPORTS-FMP4=true")
+		caps = append(caps, "HLS-VERSION=6")
+	} else if strings.Contains(ua, "edg") {
+		// Edge (Chromium-based)
+		caps = append(caps, "BROWSER=\"edge\"")
+		caps = append(caps, "SUPPORTS-FMP4=true")
+		caps = append(caps, "HLS-VERSION=6")
+	} else if strings.Contains(ua, "firefox") {
+		// Firefox (good HLS support, prefers TS)
+		caps = append(caps, "BROWSER=\"firefox\"")
+		caps = append(caps, "SUPPORTS-FMP4=false") // Prefer TS for Firefox
+		caps = append(caps, "HLS-VERSION=4")
+	} else if strings.Contains(ua, "safari") {
+		// Safari (native HLS support, all formats)
+		caps = append(caps, "BROWSER=\"safari\"")
+		caps = append(caps, "SUPPORTS-FMP4=true")
+		caps = append(caps, "HLS-VERSION=6")
+		caps = append(caps, "NATIVE-HLS=true")
+	} else if strings.Contains(ua, "brave") {
+		// Brave (Chromium-based)
+		caps = append(caps, "BROWSER=\"brave\"")
+		caps = append(caps, "SUPPORTS-FMP4=true")
+		caps = append(caps, "HLS-VERSION=6")
+	} else if strings.Contains(ua, "opera") {
+		// Opera (Chromium-based)
+		caps = append(caps, "BROWSER=\"opera\"")
+		caps = append(caps, "SUPPORTS-FMP4=true")
+		caps = append(caps, "HLS-VERSION=5")
+	} else {
+		// Unknown browser - use conservative settings
+		caps = append(caps, "BROWSER=\"unknown\"")
+		caps = append(caps, "SUPPORTS-FMP4=false")
+		caps = append(caps, "HLS-VERSION=3")
+		m.setForceCompatibility(true)
+	}
+	
+	// Android WebView detection (often problematic)
+	if strings.Contains(ua, "android") && strings.Contains(ua, "wv") {
+		caps = append(caps, "WEBVIEW=true")
+		caps = append(caps, "SUPPORTS-FMP4=false") // WebView often has issues with fMP4
+		caps = append(caps, "HLS-VERSION=3")
+	}
+	
+	return caps
+}
+
+// Helper functions for dynamic configuration
+func (m *Manager) setLowBandwidthMode(enabled bool) {
+	if m.c.LowBandwidthMode != enabled {
+		log.Printf("%s: setting low bandwidth mode: %v", m.id, enabled)
+		m.c.LowBandwidthMode = enabled
+	}
+}
+
+func (m *Manager) setForceCompatibility(enabled bool) {
+	if m.c.ForceCompatibility != enabled {
+		log.Printf("%s: setting force compatibility mode: %v", m.id, enabled)
+		m.c.ForceCompatibility = enabled
+	}
 }
 
 func (m *Manager) ffprobe() error {

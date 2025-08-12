@@ -61,6 +61,34 @@ type Config struct {
 
 	// Use GOP size workaround for streaming (NVENC)
 	UseGopSize bool `json:"useGopSize"`
+	
+	// Performance optimizations
+	
+	// Maximum concurrent transcoding processes (0 = auto-detect)
+	MaxConcurrentTranscodes int `json:"maxConcurrentTranscodes"`
+	
+	// GPU memory management
+	GPUMemoryFraction float64 `json:"gpuMemoryFraction"` // 0.8 = use 80% of GPU memory
+	
+	// Advanced CUDA/NPP settings
+	CUDADevice          int    `json:"cudaDevice"`          // GPU device index
+	NPPStreamCount      int    `json:"nppStreamCount"`      // NPP stream count for parallelism
+	CUDADecodeThreads   int    `json:"cudaDecodeThreads"`   // CUDA decoder threads
+	
+	// Memory optimization
+	ChunkBufferSize     int    `json:"chunkBufferSize"`     // Buffer size for chunk I/O (KB)
+	EnableMemoryMapping bool   `json:"enableMemoryMapping"` // Use memory mapping for large files
+	
+	// Client awareness
+	EnableClientHints   bool   `json:"enableClientHints"`   // Parse client capability headers
+	AdaptiveComplexity  bool   `json:"adaptiveComplexity"`  // Adjust encoding complexity based on content
+	
+	// HLS compatibility settings
+	HLSVersion          int    `json:"hlsVersion"`          // HLS protocol version (3, 4, 6)
+	EnableFMP4          bool   `json:"enableFMP4"`          // Enable fMP4 segments for modern browsers
+	EnableTSFallback    bool   `json:"enableTSFallback"`    // Fallback to TS for compatibility
+	LowBandwidthMode    bool   `json:"lowBandwidthMode"`    // Special mode for limited devices
+	ForceCompatibility  bool   `json:"forceCompatibility"`  // Force maximum compatibility mode
 }
 
 func (c *Config) FromFile(path string) {
