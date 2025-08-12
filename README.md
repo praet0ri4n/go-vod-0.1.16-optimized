@@ -276,6 +276,66 @@ if s.m.probe.FrameRate >= 50 { // High framerate
 
 ## 🚀 Quick Start
 
+### **Requirements**
+- **NVIDIA GPU** with NVENC support (Kepler generation or newer)
+- **FFmpeg** with CUDA, NVENC, and NPP support (see build instructions below)
+- **Go 1.19+** for building
+- **CUDA Toolkit** (for FFmpeg compilation)
+
+### **FFmpeg Build Instructions**
+This enhanced version requires FFmpeg with proper NVIDIA GPU acceleration support. Follow the official NVIDIA documentation:
+
+**📚 [NVIDIA FFmpeg GPU Acceleration Guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/11.1/ffmpeg-with-nvidia-gpu/index.html)**
+
+#### **Tested Working FFmpeg Version**
+```bash
+ffmpeg version N-120646-g6711c6a89b Copyright (c) 2000-2025 the FFmpeg developers
+built with gcc 11 (Ubuntu 11.4.0-1ubuntu1~22.04)
+configuration: --enable-nonfree --enable-cuda-nvcc --enable-libnpp --enable-nvenc --enable-nvdec 
+--extra-cflags=-I/usr/local/cuda/include --extra-ldflags=-L/usr/local/cuda/lib64 --disable-static --enable-shared
+```
+
+#### **Quick Build Summary (Ubuntu/Debian)**
+```bash
+# Install dependencies
+sudo apt-get install build-essential yasm cmake libtool libc6 libc6-dev unzip wget libnuma1 libnuma-dev
+
+# Clone and install codec headers
+git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
+cd nv-codec-headers && sudo make install && cd ..
+
+# Clone FFmpeg
+git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg/
+cd ffmpeg
+
+# Configure with NVIDIA support
+./configure --enable-nonfree --enable-cuda-nvcc --enable-libnpp --enable-nvenc --enable-nvdec \
+    --extra-cflags=-I/usr/local/cuda/include --extra-ldflags=-L/usr/local/cuda/lib64 \
+    --disable-static --enable-shared
+
+# Build and install
+make -j 8
+sudo make install
+```
+
+#### **Verify FFmpeg Build**
+Test that your FFmpeg build supports the required features:
+```bash
+# Check NVENC encoder support
+ffmpeg -encoders | grep nvenc
+
+# Check NVDEC decoder support  
+ffmpeg -decoders | grep cuvid
+
+# Test basic NVENC functionality
+ffmpeg -f lavfi -i testsrc=duration=1:size=320x240:rate=1 \
+    -vf "format=nv12,hwupload_cuda,scale_npp=640:480" \
+    -c:v h264_nvenc -t 1 -f null -
+
+# Should show "cuda" and "nv12" formats
+ffmpeg -hwaccels
+```
+
 ### **Installation**
 ```bash
 # Clone this enhanced version
@@ -288,11 +348,6 @@ CGO_ENABLED=0 go build -ldflags="-s -w"
 # Run with auto-detected settings
 ./go-vod
 ```
-
-### **Requirements**
-- **NVIDIA GPU** with NVENC support
-- **FFmpeg** with CUDA, NVENC, and NPP support  
-- **Go 1.19+** for building
 
 ### **Auto-Configuration**
 The enhanced version automatically optimizes based on:

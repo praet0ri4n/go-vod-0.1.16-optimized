@@ -1,0 +1,5 @@
+[33m21e3145[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmaster[m[33m)[m 📚 Add comprehensive documentation for community enhancements
+[33me0bad48[m 🚀 Enhanced go-vod for high-bitrate & complex video content
+[33m8db1476[m[33m ([m[1;31morigin/master[m[33m, [m[1;31morigin/HEAD[m[33m)[m Update README.md
+[33me229892[m Update README.md
+[33ma37c11d[m refactor: rename package to transcoder
