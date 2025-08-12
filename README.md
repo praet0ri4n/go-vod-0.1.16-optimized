@@ -258,7 +258,8 @@ if s.m.probe.FrameRate >= 50 { // High framerate
 ## **🎉 Final Results**
 
 ### **User Testimonial**
-> *"Unbelievable, now it plays everywhere on every browser I found and it starts blazingly fast! What a great work from you!"*
+> *"Unbelievable, now it plays everywhere on every browser I found and it starts blazingly fast! What a great work from you!"*  
+> *— Tested on Ubuntu 22.04 with NVIDIA Driver 575, handling GoPro footage and 50fps deinterlaced content*
 
 ### **Performance Transformation**
 
@@ -287,13 +288,21 @@ This enhanced version requires FFmpeg with proper NVIDIA GPU acceleration suppor
 
 **📚 [NVIDIA FFmpeg GPU Acceleration Guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/11.1/ffmpeg-with-nvidia-gpu/index.html)**
 
-#### **Tested Working FFmpeg Version**
+#### **Tested Working Configuration**
+**Environment**: Ubuntu 22.04 with NVIDIA Driver 575
 ```bash
 ffmpeg version N-120646-g6711c6a89b Copyright (c) 2000-2025 the FFmpeg developers
 built with gcc 11 (Ubuntu 11.4.0-1ubuntu1~22.04)
 configuration: --enable-nonfree --enable-cuda-nvcc --enable-libnpp --enable-nvenc --enable-nvdec 
 --extra-cflags=-I/usr/local/cuda/include --extra-ldflags=-L/usr/local/cuda/lib64 --disable-static --enable-shared
 ```
+
+**System Specifications** (proven working):
+- **OS**: Ubuntu 22.04 LTS
+- **NVIDIA Driver**: 575.x series  
+- **CUDA Toolkit**: Compatible with driver 575
+- **GPU**: NVIDIA GPU with NVENC support (Kepler or newer)
+- **Compiler**: GCC 11 (Ubuntu 11.4.0-1ubuntu1~22.04)
 
 #### **Quick Build Summary (Ubuntu/Debian)**
 ```bash
